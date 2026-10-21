@@ -1,0 +1,540 @@
+<script>
+  // ---------- State ----------
+  var TOKEN_KEY = 'ibarra_leads_token';
+  var PAGE = 60;
+  var state = { token: null, data: null, shown: PAGE, view: null, sheet: null, current: null, tab: null,
+    editing: false, saving: false, tplKey: 0 };
+  var CATEGORY_ORDER = ['Restaurant', 'Cafe/Bakery/Food maker', 'Bar/Brewery', 'Retail', 'Salon/Beauty/Wellness',
+    'Trades/Home services', 'Childcare/Education', 'Startup/Tech', 'Other'];
+  // "Mail" is a printed postcard; shown as "Postcard" so it isn't confused with email.
+  var ACTION_LABEL = { Email: 'Email', Call: 'Call', Visit: 'Visit', Mail: 'Postcard', Search: 'Look up' };
+  var ICONS = {
+    Email: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
+    Call: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>',
+    Visit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s7-6.1 7-12a7 7 0 0 0-14 0c0 5.9 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/></svg>',
+    Mail: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
+    Search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>'
+  };
+
+  // ---------- Helpers ----------
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, ms) {
+    var t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
+    clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.add('hidden'); }, ms || 2600);
+  }
+  function fmtDate(iso) {
+    if (!iso) return '';
+    var d = new Date(String(iso).length === 10 ? iso + 'T12:00:00' : iso);
+    if (isNaN(d)) return String(iso);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  function daysAgo(iso) {
+    if (!iso) return null;
+    return Math.floor((Date.now() - new Date(iso + 'T12:00:00')) / 86400000);
+  }
+  function openedText(iso) {
+    var d = daysAgo(iso);
+    if (d == null) return '';
+    if (d <= 0) return 'Opened today';
+    if (d === 1) return 'Opened yesterday';
+    if (d < 14) return 'Opened ' + d + ' days ago';
+    if (d < 60) return 'Opened ' + Math.round(d / 7) + ' weeks ago';
+    return 'Opened ' + fmtDate(iso);
+  }
+  function miles(l) { return l.distanceMi == null ? '' : l.distanceMi.toFixed(1) + ' mi'; }
+  function copyText(text, okMsg) {
+    function fallback() {
+      var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+      ta.select(); try { document.execCommand('copy'); toast(okMsg || 'Copied'); } catch (e) { toast('Copy failed: select and copy manually'); }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast(okMsg || 'Copied'); }, fallback);
+    } else fallback();
+  }
+
+  // Server call with session handling.
+  function call(fn, args, onOk, onErr) {
+    var runner = google.script.run.withSuccessHandler(onOk).withFailureHandler(function (err) {
+      var msg = (err && err.message) || String(err);
+      if (msg.indexOf('SESSION_EXPIRED') >= 0) { showLogin('Your session ended. Please enter the passcode again.'); return; }
+      if (onErr) onErr(msg); else toast(msg, 4000);
+    });
+    runner[fn].apply(runner, [state.token].concat(args || []));
+  }
+
+  // ---------- Lead logic ----------
+  function validEmail(e) { return /^[^\s@\[\]]+@[^\s@\[\]]+\.[A-Za-z]{2,}$/.test(String(e || '').trim()); }
+  function leadEmail(l) { return validEmail(l.manualEmail) ? l.manualEmail : validEmail(l.email) ? l.email : ''; }
+  function isClosed(l) { return !!l.closed || l.placesStatus === 'CLOSED_PERMANENTLY'; }
+  /** Older than the lookback window and never worked: no longer shown as new. */
+  function isStale(l) {
+    var d = daysAgo(l.opened);
+    return l.status === 'New' && d != null && d > state.data.settings.lookbackDays;
+  }
+  function isOpenNew(l) { return l.status === 'New' && !isClosed(l) && !isStale(l); }
+  function isLicense(l) { return l.source === 'abc'; }
+  function isNewRegistry(l) { return isOpenNew(l) && !isLicense(l); }
+
+  /** Best available action, in priority order: Email > Call > Visit > Mail > Search. */
+  function bestAction(l) {
+    if (l.status === 'No thanks') return null;
+    if (leadEmail(l)) return 'Email';
+    if (l.phone) return 'Call';
+    if (l.distanceMi != null && l.distanceMi <= state.data.settings.visitRadiusMiles) return 'Visit';
+    if (l.mailing) return 'Mail';
+    return 'Search';
+  }
+
+  // Primary navigation: each view is a ready-made filter with a count.
+  var VIEWS = [
+    { id: 'email', label: 'To email', test: function (l) { return isNewRegistry(l) && !!leadEmail(l); } },
+    { id: 'call', label: 'To call', test: function (l) { return isNewRegistry(l) && !leadEmail(l) && !!l.phone; } },
+    { id: 'visit', label: 'Visit or postcard', test: function (l) { return isNewRegistry(l) && !leadEmail(l) && !l.phone; } },
+    { id: 'all', label: 'All new', test: isNewRegistry },
+    { id: 'licenses', label: 'Liquor licenses', test: function (l) { return isLicense(l) && isOpenNew(l); } },
+    { id: 'progress', label: 'In progress', test: function (l) { return ['Contacted', 'Replied', 'Quoted'].indexOf(l.status) >= 0; } },
+    { id: 'customers', label: 'Customers', test: function (l) { return l.status === 'Customer'; } },
+    { id: 'nothanks', label: 'No thanks', test: function (l) { return l.status === 'No thanks'; } }
+  ];
+  function viewById(id) { for (var i = 0; i < VIEWS.length; i++) if (VIEWS[i].id === id) return VIEWS[i]; return VIEWS[3]; }
+
+  function cleanName(name) {
+    return String(name || '').replace(/[,.]?\s+(llc|inc|corp|corporation|co|ltd|l\.l\.c)\.?$/i, '').trim();
+  }
+  function streetOnly(addr) {
+    return String(addr || '').replace(/\s+(apt|unit|ste|suite|fl|floor|bldg|#)\s*\S*.*$/i, '').trim();
+  }
+  var OPENING_PHRASE = { 'Moved/new location': 'your new location at', 'Opening soon': 'your upcoming opening at',
+    'New owner': 'taking over at', 'Adding alcohol': 'your new liquor license at' };
+  function templateGroup(l) { return l.kind === 'Adding alcohol' || l.kind === 'New owner' ? l.kind : l.category; }
+  function fill(text, l) {
+    var t = state.data.templates;
+    var para = t['paragraph_' + templateGroup(l)] || t['paragraph_' + l.category] || t.paragraph_Other || '';
+    return String(text || '')
+      .split('{category_paragraph}').join(para)
+      .split('{business_name}').join(cleanName(l.name))
+      .split('{street}').join(streetOnly(l.address))
+      .split('{opening_phrase}').join(OPENING_PHRASE[l.kind] || 'opening at');
+  }
+  function draftFor(l) {
+    var t = state.data.templates;
+    return {
+      subject: l.draftSubject || fill(t['subject_' + templateGroup(l)] || t['subject_' + l.category] || t.subject_Other, l),
+      body: l.draftBody || fill(t.frame, l),
+      edited: !!(l.draftSubject || l.draftBody)
+    };
+  }
+  function mailtoFor(l) {
+    var d = draftFor(l), to = leadEmail(l);
+    var full = 'mailto:' + encodeURIComponent(to) + '?subject=' + encodeURIComponent(d.subject) +
+      '&body=' + encodeURIComponent(d.body.replace(/\n/g, '\r\n'));
+    // Some mail apps cut off long mailto links; fall back to subject only + copied body.
+    if (full.length <= 1900) return { url: full, bodyCopied: false };
+    return { url: 'mailto:' + encodeURIComponent(to) + '?subject=' + encodeURIComponent(d.subject), bodyCopied: true };
+  }
+  function mapsDirections(l) {
+    return 'https://www.google.com/maps/dir/?api=1&origin=' + encodeURIComponent('1009 Valencia St, San Francisco, CA') +
+      '&destination=' + encodeURIComponent(l.address + ', San Francisco, CA');
+  }
+  function googleSearch(l) {
+    return 'https://www.google.com/search?q=' + encodeURIComponent(l.name + ' ' + streetOnly(l.address) + ' San Francisco');
+  }
+  function websiteUrl(w) { return /^https?:\/\//i.test(w) ? w : 'https://' + w; }
+
+  // ---------- Login ----------
+  function showLogin(msg) {
+    localStorage.removeItem(TOKEN_KEY); state.token = null;
+    $('app').classList.add('hidden'); closeSheet();
+    $('login').classList.remove('hidden'); $('loginError').textContent = msg || '';
+    $('passcode').value = ''; $('passcode').focus();
+  }
+  $('loginForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var btn = e.target.querySelector('button'); btn.disabled = true; btn.textContent = 'Unlocking…';
+    $('loginError').textContent = '';
+    google.script.run.withSuccessHandler(function (token) {
+      btn.disabled = false; btn.textContent = 'Unlock';
+      state.token = token; localStorage.setItem(TOKEN_KEY, token);
+      $('login').classList.add('hidden'); loadData();
+    }).withFailureHandler(function (err) {
+      btn.disabled = false; btn.textContent = 'Unlock';
+      $('loginError').textContent = (err && err.message) || 'Could not unlock';
+    }).api_login($('passcode').value);
+  });
+  $('logoutBtn').addEventListener('click', function () { showLogin(); });
+
+  // ---------- Data ----------
+  function loadData() {
+    $('app').classList.remove('hidden');
+    $('status').textContent = 'Loading leads… (this takes a few seconds)';
+    call('api_getData', [], function (data) {
+      state.data = data; state.shown = PAGE;
+      if (!state.view) state.view = data.leads.some(VIEWS[0].test) ? 'email' : 'all';
+      buildCategoryFilter(); render();
+      $('subtitle').textContent = 'New businesses within ' + data.settings.radiusMiles + ' mi' +
+        (data.lastRefresh ? ' · updated ' + fmtDate(data.lastRefresh) : '');
+      // If the daily update stops running, say so instead of silently showing old data.
+      var hours = data.lastRefresh ? (Date.now() - new Date(data.lastRefresh)) / 3600000 : 999;
+      if (hours > 36) toast('Heads up: the daily update hasn\'t run since ' + (data.lastRefresh ? fmtDate(data.lastRefresh) : 'setup') + '. See "If something breaks" in the guide.', 8000);
+    }, function (msg) { $('status').textContent = 'Could not load leads: ' + msg; });
+  }
+
+  function buildCategoryFilter() {
+    var cats = {};
+    state.data.leads.forEach(function (l) { if (isOpenNew(l)) cats[l.category] = (cats[l.category] || 0) + 1; });
+    $('fCategory').innerHTML = '<option value="">All categories</option>' + CATEGORY_ORDER.filter(function (c) {
+      return cats[c];
+    }).map(function (c) { return '<option value="' + esc(c) + '">' + esc(c) + '</option>'; }).join('');
+  }
+
+  function filtered() {
+    var q = $('q').value.trim().toLowerCase(), cat = $('fCategory').value, sort = $('sort').value;
+    var view = viewById(state.view);
+    var list = state.data.leads.filter(function (l) {
+      if (!view.test(l)) return false;
+      if (cat && l.category !== cat) return false;
+      if (q && (l.name + ' ' + l.address + ' ' + (l.placesName || '')).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+    list.sort(function (a, b) {
+      if (sort === 'newest') return String(b.opened).localeCompare(String(a.opened));
+      if (sort === 'closest') return (a.distanceMi == null ? 99 : a.distanceMi) - (b.distanceMi == null ? 99 : b.distanceMi);
+      return b.score - a.score;
+    });
+    return list;
+  }
+
+  // ---------- Rendering ----------
+  function renderViews() {
+    $('views').innerHTML = VIEWS.map(function (v) {
+      var n = state.data.leads.filter(v.test).length;
+      if (!n && v.id === 'nothanks') return '';
+      // Tabs are plain actions (no counts): the numbers added clutter.
+      return '<button class="view' + (v.id === state.view ? ' on' : '') + '" data-view="' + v.id + '" role="tab">' +
+        esc(v.label) + '</button>';
+    }).join('');
+  }
+
+  function cardHtml(l) {
+    var a = bestAction(l);
+    var tags = [];
+    if (l.status !== 'New') tags.push('<span class="tag done">' + esc(l.status) + (l.contactedVia ? ' · ' + esc(ACTION_LABEL[l.contactedVia] || l.contactedVia) : '') + '</span>');
+    if (isLicense(l)) tags.push('<span class="tag lic">' + esc(l.kind) + '</span>');
+    else if (l.kind === 'Moved/new location') tags.push('<span class="tag">Moved here</span>');
+    if (l.homeBased) tags.push('<span class="tag">Home-based?</span>');
+    if (isClosed(l)) tags.push('<span class="tag warn">May be closed</span>');
+    return '<div class="card" data-id="' + esc(l.id) + '">' +
+      '<div class="card-main"><h3>' + esc(l.name) + '</h3>' +
+        '<div class="meta">' + esc(l.category) + (l.neighborhood ? '<span class="sep">·</span>' + esc(l.neighborhood) : '') +
+          (miles(l) ? '<span class="sep">·</span>' + miles(l) : '') + '</div>' +
+        '<div class="sub-meta"><span>' + esc(isLicense(l) ? 'License application seen ' + fmtDate(l.opened) : openedText(l.opened)) + '</span>' + tags.join('') + '</div>' +
+      '</div>' +
+      (a ? '<button class="btn act ' + a + '" data-open="' + a + '" type="button">' + ICONS[a] + ACTION_LABEL[a] + '</button>' : '') +
+    '</div>';
+  }
+
+  function render() {
+    renderViews();
+    var list = filtered();
+    $('status').textContent = list.length.toLocaleString() + ' ' + (list.length === 1 ? 'business' : 'businesses');
+    $('list').innerHTML = list.length ? list.slice(0, state.shown).map(cardHtml).join('') :
+      '<div class="empty">Nothing here' + ($('q').value || $('fCategory').value ? ' with these filters.' : ' yet.') + '</div>';
+    $('more').classList.toggle('hidden', list.length <= state.shown);
+    $('more').textContent = 'Show more (' + (list.length - state.shown).toLocaleString() + ' left)';
+  }
+
+  $('views').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-view]'); if (!b) return;
+    state.view = b.getAttribute('data-view'); state.shown = PAGE; render();
+  });
+  ['q', 'fCategory', 'sort'].forEach(function (id) {
+    $(id).addEventListener(id === 'q' ? 'input' : 'change', function () { state.shown = PAGE; render(); });
+  });
+  $('more').addEventListener('click', function () { state.shown += PAGE; render(); });
+  $('list').addEventListener('click', function (e) {
+    var card = e.target.closest('.card'); if (!card) return;
+    var btn = e.target.closest('[data-open]');
+    openDetail(card.getAttribute('data-id'), btn ? btn.getAttribute('data-open') : null);
+  });
+
+  // ---------- Sheet (lead detail / templates / results) ----------
+  function openSheet(kind, html) {
+    state.sheet = kind;
+    $('detailCard').innerHTML = html;
+    $('detail').classList.remove('hidden'); document.body.style.overflow = 'hidden';
+  }
+  function closeSheet() {
+    $('detail').classList.add('hidden'); document.body.style.overflow = '';
+    state.sheet = null; state.current = null;
+    if (state.data && !$('app').classList.contains('hidden')) render();
+  }
+  function sheetHead(title, subtitle) {
+    return '<div class="sheet-head"><div style="min-width:0"><h2>' + title + '</h2>' +
+      (subtitle ? '<div class="muted" style="margin-top:2px">' + subtitle + '</div>' : '') + '</div>' +
+      '<button class="btn close" data-act="close" aria-label="Close">&times;</button></div>';
+  }
+  $('detail').addEventListener('click', function (e) { if (e.target.id === 'detail') closeSheet(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && state.sheet) closeSheet(); });
+
+  // ---------- Lead detail ----------
+  function findLead(id) {
+    for (var i = 0; i < state.data.leads.length; i++) if (state.data.leads[i].id === id) return state.data.leads[i];
+    return null;
+  }
+  function openDetail(id, tab) {
+    state.current = findLead(id); state.editing = false;
+    state.tab = tab || bestAction(state.current) || 'Search';
+    openSheet('lead', detailHtml());
+  }
+  function rerenderDetail() { if (state.sheet === 'lead') $('detailCard').innerHTML = detailHtml(); }
+
+  function actionPanel(l) {
+    var t = state.data.templates, tab = state.tab;
+    if (tab === 'Email') {
+      var to = leadEmail(l), d = draftFor(l);
+      if (l.status === 'No thanks') return '<div class="notice" style="margin-top:0">This business asked not to be contacted. Do not email them.</div>';
+      if (!to) return '<p class="muted" style="margin:0">No email address yet. If you find one, add it under <b>Contact details</b> below and this option will appear.</p>';
+      if (state.editing) {
+        return '<div class="field" style="margin-top:0"><label for="dSubject">Subject</label><input id="dSubject" value="' + esc(d.subject) + '"></div>' +
+          '<div class="field"><label for="dBody">Message</label><textarea id="dBody" style="min-height:360px">' + esc(d.body) + '</textarea></div>' +
+          '<div class="btns" style="margin-top:12px"><button class="btn primary" data-act="saveDraft">Save changes</button>' +
+          '<button class="btn" data-act="cancelEdit">Cancel</button></div>';
+      }
+      return '<div class="steps">' +
+        '<div><div class="step-label">1 · Review</div>' +
+          '<div class="to-line">To: <b>' + esc(to) + '</b>' + (l.emailSource ? ' <span class="muted">(found via ' + esc(l.emailSource) + ')</span>' : '') + '</div>' +
+          '<div class="letter"><div class="letter-subject">' + esc(d.subject) + '</div><div class="letter-body">' + esc(d.body) + '</div></div>' +
+          '<div class="btns" style="margin-top:10px"><button class="btn small" data-act="editDraft">Edit wording</button>' +
+          (d.edited ? '<span class="muted">Edited for this business · <button class="link-btn" data-act="resetDraft">use template again</button></span>' : '') + '</div></div>' +
+        '<div><div class="step-label">2 · Send it from your email</div><div class="btns">' +
+          '<a class="btn go-Email" id="openEmail" target="_top" href="' + esc(mailtoFor(l).url) + '">' + ICONS.Email + 'Open in email</a>' +
+          '<button class="btn" data-act="copyEmail">Copy email</button>' +
+          '<a class="btn quiet" href="https://mail.zoho.com" target="_blank" rel="noopener">Open Zoho Mail ↗</a></div></div>' +
+        '<div><div class="step-label">3 · After sending</div>' +
+          '<button class="btn" data-act="mark" data-via="Email">✓ Mark as emailed</button></div>' +
+      '</div>';
+    }
+    if (tab === 'Call') {
+      if (!l.phone) return '<p class="muted" style="margin:0">No phone number found.</p>';
+      return '<div class="big-line">' + esc(l.phone) + '</div>' +
+        '<div class="btns" style="margin-top:10px"><a class="btn go-Call" href="tel:' + esc(l.phone.replace(/[^\d+]/g, '')) + '">' + ICONS.Call + 'Call</a>' +
+        '<button class="btn" data-act="mark" data-via="Call">✓ Mark as called</button></div>' +
+        (t.call_script ? '<div class="script">' + esc(t.call_script) + '</div>' : '');
+    }
+    if (tab === 'Visit') {
+      return '<div class="big-line">' + esc(l.address) + '</div>' +
+        '<div class="muted">' + esc(miles(l)) + (miles(l) ? ' from the shop' : '') + '</div>' +
+        '<div class="btns" style="margin-top:10px"><a class="btn go-Visit" target="_blank" rel="noopener" href="' + esc(mapsDirections(l)) + '">' + ICONS.Visit + 'Directions</a>' +
+        '<button class="btn" data-act="mark" data-via="Visit">✓ Mark as visited</button></div>';
+    }
+    if (tab === 'Mail') {
+      if (!l.mailing) return '<p class="muted" style="margin:0">No mailing address on file.</p>';
+      var label = cleanName(l.name) + '\n' + l.mailing.replace(/, /, '\n');
+      return '<div class="script" style="margin-top:0;border-left-color:var(--visit)">' + esc(label) + '</div>' +
+        (t.mail_note ? '<p class="muted">' + esc(t.mail_note) + '</p>' : '') +
+        '<div class="btns" style="margin-top:10px"><button class="btn go-Visit" data-act="copyAddress">Copy address</button>' +
+        '<button class="btn" data-act="mark" data-via="Mail">✓ Mark postcard sent</button></div>';
+    }
+    return '<p class="muted" style="margin:0 0 12px">We haven\'t found contact details yet. Look the business up online:</p>' +
+      '<a class="btn primary" target="_blank" rel="noopener" href="' + esc(googleSearch(l)) + '">' + ICONS.Search + 'Search on Google</a>' +
+      '<p class="muted">If you find an email, add it under <b>Contact details</b> below.</p>';
+  }
+
+  function detailHtml() {
+    var l = state.current, best = bestAction(l);
+    var sub = [esc(l.category), esc(l.neighborhood), esc(miles(l)), esc(isLicense(l) ? l.kind : openedText(l.opened))].filter(Boolean).join(' · ');
+    var tabs = ['Email', 'Call', 'Visit', 'Mail', 'Search'].map(function (tb) {
+      var avail = tb === 'Email' ? !!leadEmail(l) : tb === 'Call' ? !!l.phone : tb === 'Mail' ? !!l.mailing : true;
+      return '<button class="' + (state.tab === tb ? 'on' : '') + (avail ? '' : ' na') + '" data-tab="' + tb + '">' +
+        ACTION_LABEL[tb] + (tb === best ? '<span class="rec">Best</span>' : '') + '</button>';
+    }).join('');
+    var statusBtns = state.data.statuses.map(function (s) {
+      return '<button class="status-btn' + (s === 'No thanks' ? ' no' : s === 'Customer' ? ' win' : '') + (l.status === s ? ' on' : '') + '" data-status="' + esc(s) + '">' + esc(s) + '</button>';
+    }).join('');
+    return sheetHead(esc(l.name), sub) +
+      '<div class="sheet-body">' +
+      (isLicense(l) && l.licenseNote ? '<div class="notice lic">' + esc(l.licenseNote) + '. ' + esc({
+        'Opening soon': 'Not open at this address yet: a chance to reach them before day one.',
+        'New owner': 'A new owner is taking over: a good moment for new menus and signs.',
+        'Adding alcohol': 'They\'re adding alcohol: a good moment for drink menus and table tents.' }[l.kind] || '') + '</div>' : '') +
+      (isClosed(l) ? '<div class="notice">' + (l.closed ? 'The city lists this location as closed (' + esc(fmtDate(l.closed)) + ').' : 'Google lists this business as permanently closed.') + ' Double-check before reaching out.</div>' : '') +
+      '<div class="section"><h4>Reach out</h4><div class="seg">' + tabs + '</div>' + actionPanel(l) + '</div>' +
+      '<div class="section"><h4>Status</h4><div class="status-row">' + statusBtns + '</div>' +
+        (l.statusDate && l.status !== 'New' ? '<div class="muted" style="margin-top:8px">Updated ' + esc(fmtDate(l.statusDate)) + (l.contactedVia ? ' · contacted by ' + esc((ACTION_LABEL[l.contactedVia] || l.contactedVia).toLowerCase()) : '') + '</div>' : '') +
+        '<div class="field"><label for="notes">Notes</label><textarea id="notes" rows="3" placeholder="e.g. Spoke with the owner, wants a menu quote">' + esc(l.notes) + '</textarea></div>' +
+        '<div class="btns" style="margin-top:10px"><button class="btn small" data-act="saveNotes">Save notes</button></div></div>' +
+      '<div class="section"><h4>Contact details</h4><dl class="kv">' +
+        '<dt>Address</dt><dd>' + esc(l.address) + ', ' + esc(l.zip) + '</dd>' +
+        '<dt>Email</dt><dd>' + (leadEmail(l) ? esc(leadEmail(l)) : '<span class="muted">Not found</span>') + '</dd>' +
+        '<dt>Phone</dt><dd>' + (l.phone ? esc(l.phone) : '<span class="muted">Not found</span>') + '</dd>' +
+        '<dt>Website</dt><dd>' + (l.website ? '<a target="_blank" rel="noopener" href="' + esc(websiteUrl(l.website)) + '">' + esc(l.website) + '</a>' +
+          (l.websiteStatus === 'unreachable' ? ' <span class="tag warn">Didn\'t load when we checked</span>' : '') : '<span class="muted">Not found</span>') + '</dd>' +
+        (l.mapsUrl ? '<dt>Google Maps</dt><dd><a target="_blank" rel="noopener" href="' + esc(l.mapsUrl) + '">' + esc(l.placesName || 'View listing') + '</a></dd>' : '') +
+        '<dt>Mailing address</dt><dd>' + (l.mailing ? esc(l.mailing) : '<span class="muted">Not on file</span>') + '</dd>' +
+        '<dt>Registered owner</dt><dd>' + esc(l.owner || '—') + '</dd>' +
+      '</dl>' +
+      '<div class="field"><label for="manualEmail">Add or fix email</label><input id="manualEmail" type="email" placeholder="name@business.com" value="' + esc(l.manualEmail) + '"></div>' +
+      '<div class="btns" style="margin-top:10px"><button class="btn small" data-act="saveEmail">Save email</button>' +
+      '<a class="btn small quiet" target="_blank" rel="noopener" href="' + esc(googleSearch(l)) + '">Search on Google ↗</a></div>' +
+      '<div class="fineprint">Why it\'s ranked here: ' + esc(l.scoreExplain) + ' = ' + l.score + ' points</div></div>' +
+      '</div>';
+  }
+
+  function save(changes, okMsg, btn) {
+    var l = state.current;
+    state.saving = true;
+    if (btn) { btn.disabled = true; btn.setAttribute('data-label', btn.innerHTML); btn.textContent = 'Saving…'; }
+    var done = function () { state.saving = false; if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = btn.getAttribute('data-label'); } };
+    call('api_updateLead', [l.id, changes], function (updated) {
+      done();
+      for (var i = 0; i < state.data.leads.length; i++) {
+        if (state.data.leads[i].id === updated.id) { state.data.leads[i] = updated; break; }
+      }
+      if (state.current && state.current.id === updated.id) { state.current = updated; rerenderDetail(); }
+      toast(okMsg || 'Saved');
+    }, function (msg) { done(); toast(msg, 5000); });
+  }
+
+  // ---------- Templates editor ----------
+  var TEMPLATE_PARTS = [['frame', 'Email body (all categories)', 'Fill-ins: {business_name}, {street}, {opening_phrase}, {category_paragraph}']]
+    .concat(CATEGORY_ORDER.map(function (c) { return ['cat:' + c, c, 'Subject line and middle paragraph for this kind of business']; }))
+    .concat([['cat:New owner', 'New owner (liquor licenses)', 'Subject and middle paragraph for businesses changing owners'],
+      ['cat:Adding alcohol', 'Adding alcohol (liquor licenses)', 'Subject and middle paragraph for businesses adding alcohol']])
+    .concat([['call_script', 'Call script', 'Shown on the Call option'], ['mail_note', 'Mail note', 'Shown next to the mailing address']]);
+
+  function sampleLead(category) {
+    var pick = null;
+    state.data.leads.forEach(function (l) { if (!pick && (!category || l.category === category) && !isClosed(l)) pick = l; });
+    return pick || state.data.leads[0];
+  }
+  function templatesHtml() {
+    var t = state.data.templates, part = TEMPLATE_PARTS[state.tplKey];
+    var cat = part[0].indexOf('cat:') === 0 ? part[0].slice(4) : null;
+    var keys = cat ? ['subject_' + cat, 'paragraph_' + cat] : [part[0]];
+    var fields = keys.map(function (key, i) {
+      var label = key === 'frame' ? 'Email body' : key.indexOf('subject_') === 0 ? 'Subject line' : key.indexOf('paragraph_') === 0 ? 'Middle paragraph' : part[1];
+      var h = key === 'frame' ? 420 : key.indexOf('subject_') === 0 ? 72 : 150;
+      return '<div class="field" style="margin-top:' + (i ? 18 : 0) + 'px"><label>' + esc(label) + '</label>' +
+        '<textarea data-key="' + esc(key) + '" style="min-height:' + h + 'px">' + esc(t[key] || '') + '</textarea>' +
+        '<div class="btns"><button class="btn primary small" data-tpl="save" data-key="' + esc(key) + '">Save</button>' +
+        '<button class="btn small quiet" data-tpl="reset" data-key="' + esc(key) + '">Reset to original</button></div></div>';
+    }).join('');
+    var preview = '';
+    if (cat || part[0] === 'frame') {
+      var special = cat === 'Adding alcohol' || cat === 'New owner';
+      var s = special ? sampleLead('Restaurant') : sampleLead(cat), tmp = {}; for (var k in s) tmp[k] = s[k];
+      if (special) tmp.kind = cat;
+      else if (tmp.kind === 'Adding alcohol' || tmp.kind === 'New owner') tmp.kind = 'Opening soon';
+      tmp.draftSubject = ''; tmp.draftBody = '';
+      var d = draftFor(tmp);
+      preview = '<div class="section"><h4>Preview · ' + esc(s.name) + '</h4><div class="letter"><div class="letter-subject">' + esc(d.subject) +
+        '</div><div class="letter-body">' + esc(d.body) + '</div></div>' +
+        '<div class="fineprint" style="margin-top:10px">Saved changes apply to every lead, except leads where an email was edited and saved by hand.</div></div>';
+    }
+    var picker = '<div class="field" style="margin-top:16px"><label for="tplPart">Part to edit</label><select id="tplPart">' +
+      TEMPLATE_PARTS.map(function (p, i) { return '<option value="' + i + '"' + (i === state.tplKey ? ' selected' : '') + '>' + esc(p[1]) + '</option>'; }).join('') +
+      '</select><div class="muted">' + esc(part[2]) + '</div></div>';
+    return sheetHead('Email templates', 'The starting wording for Ibarra Brothers\' emails') +
+      '<div class="sheet-body">' + picker +
+      '<div class="tpl-grid" style="margin-top:14px"><div class="section">' + fields + '</div>' + (preview || '<div></div>') + '</div></div>';
+  }
+  function openTemplates() { openSheet('templates', templatesHtml()); }
+  $('templatesBtn').addEventListener('click', function () { openTemplates(); });
+
+  // ---------- Results ----------
+  function resultsHtml() {
+    var leads = state.data.leads;
+    var count = function (fn) { return leads.filter(fn).length; };
+    var worked = ['Contacted', 'Replied', 'Quoted', 'Customer', 'No thanks'];
+    var funnel = [
+      ['New businesses in the list', count(isOpenNew) + count(function (l) { return l.status !== 'New'; })],
+      ['Contacted', count(function (l) { return worked.indexOf(l.status) >= 0 && l.contactedVia; })],
+      ['Replied', count(function (l) { return ['Replied', 'Quoted', 'Customer'].indexOf(l.status) >= 0; })],
+      ['Quoted', count(function (l) { return ['Quoted', 'Customer'].indexOf(l.status) >= 0; })],
+      ['Customers', count(function (l) { return l.status === 'Customer'; })]
+    ];
+    var max = Math.max(1, funnel[1][1]);
+    var rows = funnel.map(function (f, i) {
+      var pct = i === 0 ? 100 : Math.round(100 * f[1] / max);
+      return '<div class="funnel-row"><span>' + esc(f[0]) + '</span><div class="bar"><span style="width:' + pct + '%;' +
+        (i === 0 ? 'background:#cfc9bc' : '') + '"></span></div><b>' + f[1].toLocaleString() + '</b></div>';
+    }).join('');
+    var by = function (key, fn) { var c = {}; leads.filter(fn).forEach(function (l) { var k = l[key] || '—'; c[k] = (c[k] || 0) + 1; }); return c; };
+    var relabel = function (c) { var o = {}; Object.keys(c).forEach(function (k) { o[ACTION_LABEL[k] || k] = c[k]; }); return o; };
+    var list = function (title, counts, order) {
+      var keys = (order || Object.keys(counts)).filter(function (k) { return counts[k]; });
+      return '<div class="section"><h4>' + esc(title) + '</h4>' + (keys.length ? '<dl class="kv">' + keys.map(function (k) {
+        return '<dt>' + esc(k) + '</dt><dd><b>' + counts[k] + '</b></dd>';
+      }).join('') + '</dl>' : '<p class="muted" style="margin:0">Nothing yet.</p>') + '</div>';
+    };
+    return sheetHead('Results', 'Based on the statuses recorded on each lead') + '<div class="sheet-body">' +
+      '<div class="section"><h4>Outreach funnel</h4><div class="funnel">' + rows + '</div>' +
+      '<div class="fineprint">Bars after the first are relative to the number contacted.</div></div>' +
+      list('Contacted by', relabel(by('contactedVia', function (l) { return l.status !== 'New' && l.contactedVia; })),
+        state.data.contactMethods.map(function (m) { return ACTION_LABEL[m] || m; })) +
+      list('Customers by kind of business', by('category', function (l) { return l.status === 'Customer'; }), CATEGORY_ORDER) +
+      list('Said no thanks', by('category', function (l) { return l.status === 'No thanks'; }), CATEGORY_ORDER) +
+      '</div>';
+  }
+  $('resultsBtn').addEventListener('click', function () { openSheet('results', resultsHtml()); });
+
+  // ---------- Sheet events ----------
+  $('detailCard').addEventListener('change', function (e) {
+    if (e.target.id === 'tplPart') { state.tplKey = Number(e.target.value); openTemplates(); }
+  });
+  $('detailCard').addEventListener('click', function (e) {
+    if (e.target.closest('[data-act="close"]')) { closeSheet(); return; }
+    if (state.sheet === 'templates') return templateClick(e);
+    if (state.sheet !== 'lead') return;
+    // "Open in email" is a plain link so browsers allow it; copy the body first when it's too long for the link.
+    if (e.target.closest('#openEmail')) {
+      if (mailtoFor(state.current).bodyCopied) copyText(draftFor(state.current).body, 'Message copied. Paste it into the email body.');
+      return;
+    }
+    var el = e.target.closest('[data-act],[data-tab],[data-status]'); if (!el || el.disabled || state.saving) return;
+    var l = state.current, act = el.getAttribute('data-act');
+    if (el.hasAttribute('data-tab')) { state.tab = el.getAttribute('data-tab'); state.editing = false; rerenderDetail(); return; }
+    if (el.hasAttribute('data-status')) {
+      var s = el.getAttribute('data-status');
+      if (s === 'No thanks' && !confirm('Mark as "No thanks"? They will be hidden and never emailed again.')) return;
+      save({ status: s }, 'Status: ' + s, el); return;
+    }
+    e.preventDefault();
+    if (act === 'editDraft') { state.editing = true; rerenderDetail(); }
+    else if (act === 'cancelEdit') { state.editing = false; rerenderDetail(); }
+    else if (act === 'saveDraft') { var sub = $('dSubject').value, body = $('dBody').value; state.editing = false; save({ draftSubject: sub, draftBody: body }, 'Draft saved', el); }
+    else if (act === 'resetDraft') { save({ draftSubject: '', draftBody: '' }, 'Back to the template wording', el); }
+    else if (act === 'copyEmail') { var d = draftFor(l); copyText('To: ' + leadEmail(l) + '\nSubject: ' + d.subject + '\n\n' + d.body, 'Email copied'); }
+    else if (act === 'copyAddress') copyText(cleanName(l.name) + '\n' + l.mailing.replace(/, /, '\n'), 'Address copied');
+    else if (act === 'mark') {
+      var via = el.getAttribute('data-via');
+      save({ status: l.status === 'New' ? 'Contacted' : l.status, contactedVia: via }, 'Marked as contacted by ' + ACTION_LABEL[via].toLowerCase(), el);
+    }
+    else if (act === 'saveNotes') save({ notes: $('notes').value }, 'Notes saved', el);
+    else if (act === 'saveEmail') save({ manualEmail: $('manualEmail').value }, 'Email saved', el);
+  });
+
+  function templateClick(e) {
+    var b = e.target.closest('[data-tpl]'); if (!b || b.disabled) return;
+    var key = b.getAttribute('data-key'), reset = b.getAttribute('data-tpl') === 'reset';
+    var box = $('detailCard').querySelector('textarea[data-key="' + key + '"]');
+    var text = reset ? null : box.value;
+    if (reset && !confirm('Put back the original wording for this part?')) return;
+    if (!reset && (key === 'frame' || key.indexOf('subject_') === 0) && text.indexOf('{business_name}') < 0 &&
+        !confirm('This no longer includes {business_name}, so the business name won\'t be filled in. Save anyway?')) return;
+    b.disabled = true; var label = b.textContent; b.textContent = 'Saving…';
+    call('api_saveTemplate', [key, text], function (templates) {
+      state.data.templates = templates; openTemplates(); toast(reset ? 'Original wording restored' : 'Template saved');
+    }, function (msg) { b.disabled = false; b.textContent = label; toast(msg, 6000); });
+  }
+
+  // ---------- Start ----------
+  state.token = localStorage.getItem(TOKEN_KEY);
+  if (state.token) loadData(); else showLogin();
+</script>

@@ -1,0 +1,24 @@
+# Secrets and credentials live outside this folder (~/.clasprc.json, Apps Script
+# Script Properties, ~/ibarra-secrets). These entries are a second line of defense only.
+.clasprc.json
+.env
+*.pem
+*.key
+credentials.json
+client_secret.json
+HANDOFF-PRIVATE.md
+
+# Per-machine clasp config (holds your Apps Script project and Sheet IDs).
+# Copy .clasp.json.example to .clasp.json and fill in your own IDs.
+.clasp.json
+
+node_modules/
+.DS_Store
+
+# data/ holds raw public downloads (SF business registrations, CA ABC license
+# reports). Contact-lookup results contain phone numbers and emails found for
+# specific people, so they are never committed.
+data/m2-*.json
+data/osm-*.json
+data/*M2_*.csv
+data/preview/

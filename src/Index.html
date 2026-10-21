@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <base target="_top">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <!-- Passcode screen -->
+  <section id="login" class="login hidden">
+    <form id="loginForm" class="login-card" autocomplete="off">
+      <div class="brand">
+        <div class="mark">IB</div>
+        <div><div class="brand-name">Ibarra Brothers Printing</div><div class="brand-sub">New business leads</div></div>
+      </div>
+      <label for="passcode">Passcode</label>
+      <input id="passcode" type="password" autofocus>
+      <button class="btn primary wide" type="submit">Unlock</button>
+      <p id="loginError" class="error"></p>
+    </form>
+  </section>
+
+  <!-- Main app -->
+  <section id="app" class="hidden">
+    <header class="top">
+      <div class="wrap">
+        <div class="brand">
+          <div class="mark">IB</div>
+          <div style="min-width:0"><div class="brand-name">Ibarra Brothers Printing</div><div class="brand-sub" id="subtitle">New business leads</div></div>
+        </div>
+        <nav class="nav">
+          <button class="btn quiet small" id="templatesBtn" type="button">Templates</button>
+          <button class="btn quiet small" id="resultsBtn" type="button">Results</button>
+          <button class="btn quiet small" id="logoutBtn" type="button">Lock</button>
+        </nav>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <div class="views" id="views" role="tablist"></div>
+      <div class="filters">
+        <input id="q" class="search" type="search" placeholder="Search by business name or street">
+        <select id="fCategory" aria-label="Category"></select>
+        <select id="sort" aria-label="Sort">
+          <option value="best">Best match first</option>
+          <option value="newest">Newest first</option>
+          <option value="closest">Closest first</option>
+        </select>
+      </div>
+
+      <main>
+        <div class="list-meta"><span id="status" class="muted">Loading leads… (this takes a few seconds)</span></div>
+        <div id="list" class="list"></div>
+        <div style="padding-top:12px"><button id="more" class="btn wide hidden" type="button">Show more</button></div>
+      </main>
+    </div>
+  </section>
+
+  <!-- Lead detail / templates / results sheet -->
+  <div id="detail" class="detail hidden" role="dialog" aria-modal="true">
+    <div class="detail-card" id="detailCard"></div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <?!= include('App'); ?>
+</body>
+</html>
