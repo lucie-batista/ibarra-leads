@@ -33,7 +33,20 @@ const banner = '<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;ba
     ? 'DEMO: real public business registrations; emails, phone numbers and websites are made-up samples. Any passcode works.'
     : 'LOCAL PREVIEW: real businesses, but emails, phone numbers and websites are made-up samples. Nothing here changes the real Sheet.') + '</div>';
 const mock = banner + `<script>
-  var __data = ${JSON.stringify(data)};
+  var __data = ${JSON.stringify(data)};${isPublic ? `
+  // Public demo: shift every date by the days since the build, so "Opened 5 days ago"
+  // and "updated today" read the same whenever someone views it.
+  (function () {
+    var now = new Date(), built = new Date(__data.generatedAt);
+    var days = Math.round((new Date(now.getFullYear(), now.getMonth(), now.getDate()) -
+      new Date(built.getFullYear(), built.getMonth(), built.getDate())) / 86400000);
+    if (days <= 0) return;
+    var ms = days * 86400000;
+    var day = function (s) { return s ? new Date(new Date(s + 'T12:00:00Z').getTime() + ms).toISOString().slice(0, 10) : s; };
+    var stamp = function (s) { return s ? new Date(new Date(s).getTime() + ms).toISOString() : s; };
+    __data.leads.forEach(function (l) { l.opened = day(l.opened); l.closed = day(l.closed); });
+    __data.lastRefresh = stamp(__data.lastRefresh); __data.generatedAt = stamp(__data.generatedAt);
+  })();` : ''}
   window.google = { script: { get run() {
     var ok = function () {}, fail = function () {};
     var api = {
