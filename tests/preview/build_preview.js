@@ -1,6 +1,6 @@
 // Renders the real web app UI as a static page with a mocked google.script.run,
 // using real leads (contacts stubbed). Output goes to data/preview (gitignored).
-// Usage: node tests/preview/build_preview.js
+// Usage: node tests/preview/build_preview.js [--public]
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const { ctx, props } = require('../harness.js');
 const run = c => vm.runInContext(c, ctx);
@@ -18,11 +18,20 @@ props.PASSCODE_NEW = 'preview'; run('applyPendingPasscode_()');
 const token = run("api_login('preview')");
 const data = run(`api_getData('${token}')`);
 data.leads.forEach((l, i) => { if (i % 4 === 1) { l.email = 'hello@business-example.test'; l.emailSource = 'website'; } });
+// --public: a shareable demo. Drops home-based registrations, hides owner names and
+// uses the business address for postcards, so no personal names or home addresses show.
+const isPublic = process.argv.includes('--public');
+if (isPublic) {
+  data.leads = data.leads.filter(l => !l.homeBased);
+  data.leads.forEach(l => { l.owner = ''; l.mailing = l.address + ', San Francisco, CA ' + (l.zip || ''); });
+}
 
 const src = f => fs.readFileSync(path.join(__dirname, '../../src', f), 'utf8');
 const banner = '<div style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:#fff3c4;color:#5c4400;' +
   'font:600 13px/1.4 -apple-system,sans-serif;text-align:center;padding:8px 12px;border-top:1px solid #e8d48a">' +
-  'LOCAL PREVIEW: real businesses, but emails, phone numbers and websites are made-up samples. Nothing here changes the real Sheet.</div>';
+  (isPublic
+    ? 'DEMO: real public business registrations; emails, phone numbers and websites are made-up samples. Any passcode works.'
+    : 'LOCAL PREVIEW: real businesses, but emails, phone numbers and websites are made-up samples. Nothing here changes the real Sheet.') + '</div>';
 const mock = banner + `<script>
   var __data = ${JSON.stringify(data)};
   window.google = { script: { get run() {

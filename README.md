@@ -8,7 +8,14 @@ Built by **Lucie** ([@lucie-batista](https://github.com/lucie-batista)) in Octob
 
 ## The problem
 
-A neighborhood print shop gets much of its work from new businesses: menus, signage, business cards, flyers. But new businesses are hard to spot early. They don't have websites or listings yet, and by the time they're visible, they've often already found a printer. The city and state publish new registrations and license applications as open data, but nobody at a small shop has time to watch those feeds, work out which entries matter, and find a way to reach each one.
+Ibarra Brothers Printing is a family print shop on Valencia St. When I met with the shop, two things stood out:
+
+- **Their customer base is shrinking.** Many of their regular customers are local businesses that are closing down because of macroeconomic conditions.
+- **Word of mouth was their only way of getting new customers.** There was no process for finding new business proactively.
+
+So instead of focusing on the businesses the shop was losing, I decided to target the ones that are **just opening**. New businesses need a lot of printing (menus, signage, business cards, flyers) and haven't picked a printer yet. But they're hard to spot early: they don't have websites or listings, and by the time they're visible, they've often already found someone. San Francisco and California publish new business registrations and liquor-license applications as open data, but nobody at a small shop has time to watch those feeds, work out which entries matter, and find a way to reach each one.
+
+Ibarra Leads does that every morning and turns it into a short, ranked list of businesses to contact, with a drafted email ready to review. It gives the shop a repeatable way to find new customers beyond word of mouth.
 
 ## What it does
 
@@ -22,9 +29,17 @@ A neighborhood print shop gets much of its work from new businesses: menus, sign
 - **Imports liquor-license applications** from CA ABC "New Applications" reports to spot openings before they appear in the business registry.
 - **Passcode-protected web app** that works on desktop and phone.
 
-## Screenshots
+## Demo and screenshots
 
-_Coming soon._
+**[Try the interactive demo](https://lucie-batista.github.io/ibarra-leads/demo/)** (any passcode works). It runs the real UI in the browser on real public business registrations, with made-up emails, phone numbers and websites. Nothing is sent or saved.
+
+| Leads to contact, best first | Drafted email, ready to review |
+|---|---|
+| ![Lead list](docs/screenshots/lead-list.png) | ![Email draft](docs/screenshots/email-draft.png) |
+
+<img src="docs/screenshots/phone.png" alt="Lead detail on a phone" width="260">
+
+_Works on phones too._
 
 ## How it works
 
@@ -93,6 +108,7 @@ When a service fails (no key, out of credit, HTTP 403/429), the run logs it and 
 | `tests/` | Node tests and an in-memory Apps Script emulator (`harness.js`); `tests/preview/` builds a static UI preview |
 | `scripts/` | Data analysis (`abc_analyze.py`, `m2_contact_test.py`, `preview_classify.js`) and the pre-deploy `secret_scan.py` |
 | `data/` | Raw public downloads used by the tests and analysis (see [Data](#data)) |
+| `docs/` | README screenshots and the static demo served by GitHub Pages |
 | `DECISIONS.md` | Every design decision, the options considered, and why |
 | `METRICS.md` | Measured numbers: contact hit rates, pipeline runs, costs |
 | `HANDOFF.md` | Plain-language user guide written for the shop |
@@ -115,6 +131,8 @@ node scripts/preview_classify.js data/window-2mi-180d.json   # category mapping 
 ```
 
 Scripts and tests read `data/` by default. Set `IBARRA_DATA=/some/folder` to use a different data folder.
+
+To rebuild the demo, run `node tests/preview/build_preview.js --public` and copy `data/preview/index.html` to `docs/demo/`. The `--public` flag leaves out home-based registrations and owner names. Screenshots come from `python3 tests/preview/screenshots.py <tag>` (needs Playwright).
 
 ## Deploying your own copy
 

@@ -27,6 +27,8 @@ PATTERNS = [
 # so personal numbers never land in the repo.
 PHONE = re.compile(r"\(?\b\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}\b")
 ALLOWED_PHONES = {"4158266700"}
+# 555-0100 to 555-0199 is reserved for fictional use (the demo's sample numbers).
+FICTIONAL_PHONE = re.compile(r"\d{3}55501\d\d")
 
 # Lines containing this marker are ignored (use only for documented examples).
 ALLOW_MARKER = "secret-scan:allow"
@@ -44,7 +46,7 @@ def scan_file(path):
                         findings.append((lineno, label))
                 for m in PHONE.finditer(line):
                     digits = re.sub(r"\D", "", m.group(0))
-                    if digits not in ALLOWED_PHONES:
+                    if digits not in ALLOWED_PHONES and not FICTIONAL_PHONE.fullmatch(digits):
                         findings.append((lineno, "Phone number (not the shop's)"))
     except OSError as e:
         findings.append((0, "Unreadable file: %s" % e))
@@ -55,7 +57,8 @@ def main():
     problems = 0
     self_path = os.path.abspath(__file__)
     for dirpath, dirnames, filenames in os.walk(ROOT):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS
+                       and os.path.relpath(os.path.join(dirpath, d), ROOT) != os.path.join("data", "preview")]
         for name in filenames:
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, ROOT)
